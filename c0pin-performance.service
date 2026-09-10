@@ -1,6 +1,7 @@
 [Unit]
 Description=c0pin CPU performance policy tuner
 After=sysinit.target
+Conflicts=c0pin-aggressive.service
 
 ConditionPathExists=/sys/devices/system/cpu/cpufreq
 
@@ -41,8 +42,6 @@ SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 UMask=0077
-
-Conflicts=c0pin-aggressive.service
 
 [Install]
 WantedBy=multi-user.target

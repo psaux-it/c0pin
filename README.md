@@ -36,7 +36,8 @@ This mode does **not** modify:
 sudo c0pin --aggressive
 ```
 
-Aggressive mode applies the performance policy and additionally configures more aggressive CPU performance settings where supported.
+Aggressive mode applies the performance policy and additionally configures
+more aggressive CPU performance settings where supported.
 
 On Intel systems using Intel pstate, c0pin attempts to:
 
@@ -68,16 +69,6 @@ sudo c0pin --aggressive 100
 ```
 
 The DMA latency constraint remains active while c0pin is running.
-
-## Important Behavior
-
-c0pin does **not** save and restore the previous CPU configuration.
-
-CPU settings changed by c0pin are not automatically reverted when the program exits.
-
-For example, stopping aggressive mode releases the `/dev/cpu_dma_latency` constraint, but does not automatically restore previous governor, EPP, boost, turbo, or frequency-limit settings.
-
-Treat c0pin as a CPU policy configuration utility rather than a temporary configuration switch.
 
 ## Installation
 
@@ -118,37 +109,37 @@ After installation:
 man 8 c0pin
 ```
 
-You can also read the manual page directly from the source tree:
-
-```bash
-man ./c0pin.8
-```
-
 ## Usage
 
-### Apply Performance Policy
+c0pin provides **two independent operating modes**. Choose the mode that matches
+your requirements. You do **not** need to run both modes.
+
+### Performance Policy
+
+Use this mode for a performance-oriented CPU policy without aggressive tuning
+or CPU DMA latency QoS:
 
 ```bash
 sudo c0pin --performance-policy
 ```
 
-### Start Aggressive Mode
+c0pin applies the performance policy and exits. The configured CPU policy
+remains in effect until it is changed by another component or explicitly
+reconfigured.
+
+### Aggressive Mode
+
+Use this mode when you also want the Performance Policy, aggressive CPU
+performance controls, and a CPU DMA latency QoS constraint:
 
 ```bash
 sudo c0pin --aggressive
 ```
 
-### Start Aggressive Mode with a Custom DMA Latency Bound
+Aggressive mode runs in the foreground while the DMA latency constraint is held.
 
-```bash
-sudo c0pin --aggressive 100
-```
-
-Press `Ctrl+C` to terminate aggressive mode.
-
-`SIGTERM` is also handled for clean termination.
-
-When aggressive mode terminates, the DMA latency file descriptor is closed and the associated QoS constraint is released.
+When aggressive mode terminates, the DMA latency file descriptor is closed and
+the associated QoS constraint is released.
 
 ## systemd
 
@@ -175,6 +166,8 @@ systemctl status c0pin-performance.service
 ```
 
 This is a `oneshot` service. c0pin applies the requested policy and exits.
+The configured CPU policy remains in effect until it is changed by another
+component or explicitly reconfigured.
 
 ### Aggressive Service
 
@@ -202,9 +195,11 @@ Stop:
 sudo systemctl stop c0pin-aggressive.service
 ```
 
-The aggressive service remains active while c0pin holds the CPU DMA latency QoS constraint.
+The aggressive service remains active while c0pin holds the CPU DMA latency QoS
+constraint.
 
-The two provided services conflict with each other and are not intended to run simultaneously.
+The two provided services conflict with each other and are not intended to run
+simultaneously.
 
 ## Uninstallation
 
@@ -214,7 +209,14 @@ If installed with the Makefile:
 sudo make uninstall
 ```
 
-Then reload systemd if necessary:
+If a service was enabled previously, disable it before uninstalling:
+
+```bash
+sudo systemctl disable c0pin-performance.service
+sudo systemctl disable c0pin-aggressive.service
+```
+
+Then reload systemd:
 
 ```bash
 sudo systemctl daemon-reload
@@ -242,7 +244,19 @@ The systemd unit directory can also be overridden:
 make UNITDIR=/usr/lib/systemd/system install
 ```
 
-A genuine error occurred while inspecting, configuring, verifying, or acquiring a required resource.
+## Important
+
+c0pin does **not** save and restore the previous CPU configuration.
+
+CPU settings changed by c0pin are not automatically reverted when the program
+or service exits.
+
+For example, stopping aggressive mode releases the `/dev/cpu_dma_latency`
+constraint, but does not automatically restore previous governor, EPP, boost,
+turbo, or frequency-limit settings.
+
+Treat c0pin as a CPU policy configuration utility rather than a temporary
+configuration switch.
 
 ## License
 
@@ -261,6 +275,8 @@ c0pin is released under the [MIT License](LICENSE).
 
 ---
 
-c0pin is a Linux system utility for CPU performance policy configuration.
+c0pin is a Linux system utility for enforcing CPU performance-oriented policies.
 
-Its behavior is determined by the Linux kernel, CPU, firmware, and active cpufreq driver.
+It configures the CPU to favor performance over power efficiency through Linux
+kernel interfaces. Actual CPU frequency remains subject to hardware, firmware,
+thermal, power, and kernel limits.

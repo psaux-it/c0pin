@@ -1,0 +1,55 @@
+[Unit]
+Description=CPUFreq aggressive tuner with CPU DMA latency lock
+After=sysinit.target
+
+ConditionPathExists=/sys/devices/system/cpu/cpufreq
+ConditionPathExists=/dev/cpu_dma_latency
+
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/c0pin --aggressive 0
+
+SuccessExitStatus=0
+
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ReadWritePaths=/sys/devices/system/cpu/cpufreq
+ReadWritePaths=/sys/devices/system/cpu/intel_pstate
+
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SYS_ADMIN
+
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+
+MemoryDenyWriteExecute=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+
+RestrictAddressFamilies=
+RestrictNamespaces=true
+
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @reboot @swap @raw-io @cpu-emulation @obsolete
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+DeviceAllow=/dev/cpu_dma_latency rw
+
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

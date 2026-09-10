@@ -1,0 +1,282 @@
+.TH C0PIN 8 "2026-09-11" "c0pin" "System Administration"
+.SH NAME
+c0pin \- Configure Linux CPU performance policies
+.SH SYNOPSIS
+.B c0pin
+.B --performance-policy
+.br
+.B c0pin
+.B --aggressive
+.RI [ latency_us ]
+.SH DESCRIPTION
+.B c0pin
+is a root-only Linux utility for configuring CPU frequency and
+performance policies through kernel interfaces exposed by cpufreq,
+Intel pstate, and related CPU performance mechanisms.
+
+The program supports two operating modes.
+
+.SS Performance policy mode
+When invoked with
+.BR --performance-policy ,
+.B c0pin
+configures each available cpufreq policy to use the
+.B performance
+governor.
+
+Where supported, it also sets the Energy Performance Preference (EPP)
+to
+.BR performance .
+
+Performance policy mode does not modify CPU turbo or boost state,
+CPU idle or C-state behavior, or CPU DMA latency QoS.
+
+After applying and verifying the requested policy,
+.B c0pin
+exits.
+
+.SS Aggressive mode
+When invoked with
+.BR --aggressive ,
+.B c0pin
+performs the performance policy configuration and additionally applies
+more aggressive performance settings where the corresponding kernel
+interfaces are available.
+
+On Intel systems using Intel pstate, the program enables turbo
+operation and sets the maximum performance percentage to 100 when
+those controls are available.
+
+The program also enables the kernel CPU boost mechanism where
+supported.
+
+For each cpufreq policy, the program attempts to set the maximum
+frequency to the hardware-reported
+.B cpuinfo_max_freq .
+For drivers other than
+.BR amd-pstate ,
+it also attempts to set the minimum frequency to that value.
+With
+.BR amd-pstate ,
+the minimum frequency remains controlled by the kernel driver.
+
+Aggressive mode also opens
+.B /dev/cpu_dma_latency
+and writes the requested latency bound to the device.
+
+The optional
+.I latency_us
+argument specifies the requested CPU DMA latency bound in
+microseconds.
+
+If
+.I latency_us
+is omitted, the default value is
+.BR 0 .
+
+The latency file descriptor remains open for the lifetime of the
+process. The corresponding DMA latency QoS constraint is therefore
+held while aggressive mode is running.
+
+Aggressive mode waits for
+.B SIGTERM
+or
+.B SIGINT
+and exits after receiving either signal.
+
+.SH CPU DMA LATENCY
+Aggressive mode requires
+.B /dev/cpu_dma_latency
+to be available and accessible.
+
+The latency lock is acquired before CPU performance state is modified.
+If the latency device cannot be opened or the requested latency value
+cannot be written, aggressive mode exits with an error without
+applying the CPU performance configuration.
+
+When the process exits, the latency file descriptor is closed and the
+associated DMA latency QoS constraint is released.
+
+.SH CONFIGURATION BEHAVIOR
+.B c0pin
+operates on the CPU policies exposed through
+.BR /sys/devices/system/cpu/cpufreq .
+
+The exact controls available depend on the CPU, kernel version, and
+active cpufreq driver.
+
+Optional controls that are not supported by the running kernel are
+skipped where appropriate.
+
+A successful invocation therefore does not imply that every possible
+CPU performance control exists or was changed.
+
+.SH IMPORTANT
+.B c0pin
+does not save and restore the previous CPU configuration.
+
+CPU settings changed by
+.B c0pin
+are not automatically reverted when the program exits.
+
+In particular, stopping aggressive mode releases the
+.B /dev/cpu_dma_latency
+constraint, but does not automatically restore governor, EPP, boost,
+turbo, or frequency-limit settings previously changed by the program.
+
+Administrators should therefore treat mode changes as persistent
+kernel configuration changes unless another tool or configuration
+mechanism explicitly restores the previous state.
+
+.SH ROOT PRIVILEGES
+.B c0pin
+must be executed with effective user ID 0.
+
+The program is intended to be used as a system administration utility
+or through a privileged systemd service.
+
+.SH SYSTEMD
+The project provides separate systemd services for the two operating
+modes.
+
+.TP
+.B c0pin-performance.service
+Runs
+.B c0pin --performance-policy
+as a one-shot service.
+
+.TP
+.B c0pin-aggressive.service
+Runs
+.B c0pin --aggressive 0
+and remains active while the DMA latency constraint is held.
+
+The two services are configured to conflict with each other and are
+not intended to run simultaneously.
+
+Stopping
+.B c0pin-aggressive.service
+releases the DMA latency constraint when the c0pin process exits, but
+does not automatically restore other CPU settings changed by
+aggressive mode.
+
+.SH OPTIONS
+.TP
+.B --performance-policy
+Apply the performance cpufreq governor and, where supported, the
+performance EPP setting, then exit.
+
+.TP
+.B --aggressive
+Apply the performance policy and additional aggressive CPU performance
+settings, acquire the CPU DMA latency constraint, and remain running
+until terminated.
+
+.TP
+.I latency_us
+Optional CPU DMA latency bound in microseconds for aggressive mode.
+The default is
+.BR 0 .
+
+.SH EXIT STATUS
+.TP
+.B 0
+The requested operation completed successfully.
+
+Unsupported optional kernel interfaces do not by themselves cause a
+failure.
+
+.TP
+.B 1
+A genuine error occurred while inspecting, configuring, verifying, or
+acquiring a required resource.
+
+.SH SIGNALS
+Aggressive mode handles
+.B SIGINT
+and
+.B SIGTERM
+as requests for clean termination.
+
+On termination, the CPU DMA latency file descriptor is closed,
+releasing the associated DMA latency QoS constraint.
+
+Other CPU configuration changes are not automatically reverted.
+
+.SH FILES
+.TP
+.B /sys/devices/system/cpu/cpufreq/
+Linux cpufreq policy interfaces.
+
+.TP
+.B /sys/devices/system/cpu/intel_pstate/
+Intel pstate controls when the Intel pstate driver is available.
+
+.TP
+.B /dev/cpu_dma_latency
+CPU DMA latency QoS interface used by aggressive mode.
+
+.TP
+.B /etc/systemd/system/c0pin-performance.service
+Systemd service for performance policy mode.
+
+.TP
+.B /etc/systemd/system/c0pin-aggressive.service
+Systemd service for aggressive mode.
+
+.SH EXAMPLES
+Apply the normal performance policy and exit:
+.PP
+.nf
+c0pin --performance-policy
+.fi
+
+.PP
+Run aggressive mode with the default zero microsecond latency bound:
+.PP
+.nf
+c0pin --aggressive
+.fi
+
+.PP
+Run aggressive mode with a 100 microsecond latency bound:
+.PP
+.nf
+c0pin --aggressive 100
+.fi
+
+.PP
+Start the performance systemd service:
+.PP
+.nf
+systemctl start c0pin-performance.service
+.fi
+
+.PP
+Start the aggressive systemd service:
+.PP
+.nf
+systemctl start c0pin-aggressive.service
+.fi
+
+.SH NOTES
+The behavior of CPU frequency and performance controls is determined
+by the active Linux kernel CPU frequency driver.
+
+In particular, Intel pstate and amd-pstate expose different controls
+and may handle minimum and maximum frequency limits differently.
+
+The presence of a cpufreq policy does not guarantee that every
+attribute used by aggressive mode is available.
+
+.SH SEE ALSO
+.BR systemd.service (5),
+.BR systemd.exec (5),
+.BR sysfs (5)
+
+.SH AUTHORS
+.B Hasan CALISIR
+.RI <hasan.calisir@psauxit.com>
+
+.SH LICENSE
+c0pin is distributed under the MIT License.

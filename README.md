@@ -1,39 +1,12 @@
 # c0pin
 
-**c0pin** is a root-only Linux CPU performance policy tuner.
+**c0pin** is a Linux CPU performance and latency tuner.
 
-It provides two operating modes for configuring CPU frequency and performance policies through Linux kernel interfaces such as cpufreq, Intel pstate, amd-pstate, and CPU DMA latency QoS.
+It provides explicit CPU performance policies for systems where predictable CPU
+responsiveness is more important than power efficiency.
 
-## Features
-
-- CPU frequency policy tuning
-- `performance` cpufreq governor configuration
-- Energy Performance Preference (EPP) configuration where supported
-- Intel pstate performance controls where available
-- CPU boost configuration where supported
-- CPU frequency limit configuration
-- `/dev/cpu_dma_latency` QoS support
-- Separate normal and aggressive operating modes
-- Root-only execution
-- systemd service files included
-- Minimal dependencies
-- MIT licensed
-
-## Requirements
-
-- Linux
-- Root privileges
-- Linux cpufreq support
-- GCC or another compatible C compiler
-- systemd for the provided service files
-
-Aggressive mode additionally requires:
-
-```text
-/dev/cpu_dma_latency
-```
-
-The exact controls available depend on the Linux kernel, CPU, firmware, and active cpufreq driver.
+c0pin configures Linux kernel interfaces such as **cpufreq**, **Intel pstate**,
+**amd-pstate**, CPU boost controls, and **CPU DMA latency QoS**.
 
 ## Modes
 
@@ -269,72 +242,7 @@ The systemd unit directory can also be overridden:
 make UNITDIR=/usr/lib/systemd/system install
 ```
 
-## Security
-
-c0pin requires root privileges because it modifies kernel CPU performance interfaces.
-
-The provided systemd services include several systemd security hardening options, including:
-
-- `ProtectSystem=strict`
-- `ProtectHome=true`
-- `PrivateTmp=true`
-- `PrivateNetwork=true`
-- `NoNewPrivileges=true`
-- `CapabilityBoundingSet`
-- `RestrictNamespaces=true`
-- `SystemCallFilter`
-- `SystemCallArchitectures=native`
-- `MemoryDenyWriteExecute=true`
-- `LockPersonality=true`
-
-The aggressive service additionally grants access to:
-
-```text
-/dev/cpu_dma_latency
-```
-
-through the systemd device policy.
-
-## Supported CPU Drivers
-
-Behavior depends on the active Linux cpufreq driver.
-
-Examples include:
-
-- Intel pstate
-- amd-pstate
-- Generic cpufreq drivers
-
-Not every CPU or kernel exposes every control.
-
-Unsupported optional kernel interfaces are skipped where appropriate.
-
-Therefore, a successful c0pin invocation does not imply that every possible CPU performance control was available or changed.
-
-## Exit Status
-
-### `0`
-
-The requested operation completed successfully.
-
-Unsupported optional kernel interfaces do not by themselves cause a failure.
-
-### `1`
-
 A genuine error occurred while inspecting, configuring, verifying, or acquiring a required resource.
-
-## Project Structure
-
-```text
-c0pin/
-├── LICENSE
-├── Makefile
-├── README.md
-├── c0pin.c
-├── c0pin.8
-├── c0pin-aggressive.service
-└── c0pin-performance.service
-```
 
 ## License
 

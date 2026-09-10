@@ -12,16 +12,19 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build
         run: make
 
+      - name: Install
+        run: sudo make install
+
       - name: Verify systemd units
         run: |
           systemd-analyze verify \
-            ./c0pin-performance.service \
-            ./c0pin-aggressive.service
+            /etc/systemd/system/c0pin-performance.service \
+            /etc/systemd/system/c0pin-aggressive.service
 
       - name: Clean build
         run: make clean

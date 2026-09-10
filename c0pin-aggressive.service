@@ -1,6 +1,7 @@
 [Unit]
 Description=CPUFreq aggressive tuner with CPU DMA latency lock
 After=sysinit.target
+Conflicts=c0pin-performance.service
 
 ConditionPathExists=/sys/devices/system/cpu/cpufreq
 ConditionPathExists=/dev/cpu_dma_latency

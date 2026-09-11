@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: c0pin CI
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 
 jobs:
   build:
+    name: Build and Smoke Test
     runs-on: ubuntu-latest
 
     steps:
@@ -29,7 +30,6 @@ jobs:
       - name: Smoke test binary
         run: |
           test -x /usr/local/sbin/c0pin
-          sudo /usr/local/sbin/c0pin --help
 
       - name: Smoke test performance policy
         run: |

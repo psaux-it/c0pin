@@ -26,6 +26,53 @@ jobs:
             /etc/systemd/system/c0pin-performance.service \
             /etc/systemd/system/c0pin-aggressive.service
 
+      - name: Smoke test binary
+        run: |
+          test -x /usr/local/sbin/c0pin
+          sudo /usr/local/sbin/c0pin --help
+
+      - name: Smoke test performance policy
+        run: |
+          if [ -d /sys/devices/system/cpu/cpufreq ]; then
+            sudo /usr/local/sbin/c0pin --performance-policy
+          else
+            echo "CPUFreq sysfs not available, skipping performance smoke test"
+          fi
+
+      - name: Smoke test aggressive mode
+        run: |
+          if [ -e /dev/cpu_dma_latency ] && \
+             [ -d /sys/devices/system/cpu/cpufreq ]; then
+
+            set +e
+
+            sudo timeout \
+              --signal=TERM \
+              --kill-after=5s \
+              10 \
+              /usr/local/sbin/c0pin --aggressive 0
+
+            rc=$?
+
+            set -e
+
+            case "$rc" in
+              124|143)
+                echo "Aggressive mode terminated by timeout as expected"
+                ;;
+              0)
+                echo "Aggressive mode exited normally"
+                ;;
+              *)
+                echo "Aggressive mode failed with exit code: $rc"
+                exit "$rc"
+                ;;
+            esac
+
+          else
+            echo "Required CPU latency/CPUFreq interfaces unavailable, skipping aggressive smoke test"
+          fi
+
       - name: Clean build
         run: make clean
 

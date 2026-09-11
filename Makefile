@@ -3,8 +3,6 @@
 TARGET = c0pin
 SRC    = c0pin.c
 
-UNITS = c0pin-performance.service c0pin-aggressive.service
-
 # Overridable by the caller
 PREFIX  ?= /usr/local
 SBINDIR ?= $(PREFIX)/sbin

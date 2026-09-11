@@ -1,5 +1,7 @@
 # c0pin
 
+[![CI](https://github.com/psaux-it/c0pin/actions/workflows/c-cpp.yml/badge.svg)](https://github.com/psaux-it/c0pin/actions/workflows/c-cpp.yml)
+
 **c0pin** is a Linux CPU performance and latency tuner.
 
 It provides explicit CPU performance policies for systems where predictable CPU

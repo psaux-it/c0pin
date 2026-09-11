@@ -33,16 +33,16 @@ jobs:
 
       - name: Smoke test performance policy
         run: |
-          if [ -d /sys/devices/system/cpu/cpufreq ]; then
+          if compgen -G "/sys/devices/system/cpu/cpufreq/policy*" > /dev/null; then
             sudo /usr/local/sbin/c0pin --performance-policy
           else
-            echo "CPUFreq sysfs not available, skipping performance smoke test"
+            echo "No CPUFreq policies available, skipping performance smoke test"
           fi
 
       - name: Smoke test aggressive mode
         run: |
           if [ -e /dev/cpu_dma_latency ] && \
-             [ -d /sys/devices/system/cpu/cpufreq ]; then
+             compgen -G "/sys/devices/system/cpu/cpufreq/policy*" > /dev/null; then
 
             set +e
 
@@ -70,7 +70,7 @@ jobs:
             esac
 
           else
-            echo "Required CPU latency/CPUFreq interfaces unavailable, skipping aggressive smoke test"
+            echo "Required CPUFreq policies or CPU DMA latency interface unavailable, skipping aggressive smoke test"
           fi
 
       - name: Clean build

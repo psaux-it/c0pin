@@ -84,7 +84,7 @@ struct policy_state {
     char driver[128];
     char governor[128];
     char epp[128];
-    bool is_amd_pstate;
+    bool is_amd_pstate_epp;
 };
 
 /*
@@ -324,10 +324,23 @@ static bool list_contains(const char *list, const char *needle)
     return false;
 }
 
-static bool is_amd_pstate_driver(const char *driver)
+/*
+ * Only amd-pstate-epp (active/EPP mode, cpufreq_driver->setpolicy) clamps
+ * CPPC min-perf to nominal_perf under the "performance" cpufreq policy
+ * CPUFREQ_POLICY_PERFORMANCE. That field is set exclusively from
+ * amd_pstate_epp_set_policy().
+ *
+ * Plain "amd-pstate" (passive/guided mode, cpufreq_driver->target /
+ * ->fast_switch) never assigns cpudata->policy -- it stays
+ * CPUFREQ_POLICY_UNKNOWN (0) for the life of the policy object -- so
+ * amd_pstate_update_min_max_limit() always takes the else branch there
+ * and maps scaling_min_freq straight onto CPPC min-perf. Treating it the
+ * same as amd-pstate-epp here would skip a pin that the kernel would
+ * actually honor.
+ */
+static bool is_amd_pstate_epp_driver(const char *driver)
 {
-    return driver && (!strcmp(driver, "amd-pstate") ||
-                       !strcmp(driver, "amd-pstate-epp"));
+    return driver && !strcmp(driver, "amd-pstate-epp");
 }
 
 static int read_policy_field(const char *policy, const char *name,
@@ -444,7 +457,7 @@ static int read_policy_state(const char *policy, struct policy_state *st)
         }
     }
 
-    st->is_amd_pstate = is_amd_pstate_driver(st->driver);
+    st->is_amd_pstate_epp = is_amd_pstate_epp_driver(st->driver);
     return 0;
 }
 
@@ -990,11 +1003,14 @@ static int process_policy(const char *policy, bool aggressive,
         }
 
         /*
-         * amd-pstate keeps CPPC min-perf kernel-controlled under the
-         * performance governor -- scaling_min_freq == max here doesn't
-         * mean MinPerf is actually pinned to max.
+         * amd-pstate-epp (active/EPP mode) keeps CPPC min-perf
+         * kernel-controlled under the performance governor --
+         * scaling_min_freq == max here doesn't mean MinPerf is actually
+         * pinned to max. Plain amd-pstate (passive/guided mode) has no
+         * such clamp and honors scaling_min_freq like any other driver,
+         * so it is still pinned here.
          */
-        rc = aggressive_frequency_limit(&before, !before.is_amd_pstate,
+        rc = aggressive_frequency_limit(&before, !before.is_amd_pstate_epp,
                                         &effective_max);
         if (rc == RC_ERROR) {
             fprintf(stderr,
@@ -1025,7 +1041,7 @@ static int process_policy(const char *policy, bool aggressive,
         printf(" policy=[%lu,%lu] cpuinfo=[%lu,%lu]",
                after.scaling_min, after.scaling_max,
                after.cpuinfo_min, after.cpuinfo_max);
-        if (aggressive && after.is_amd_pstate)
+        if (aggressive && after.is_amd_pstate_epp)
             printf(" amd_min=kernel-controlled");
         printf("\n");
 
@@ -1040,7 +1056,7 @@ static int process_policy(const char *policy, bool aggressive,
             after.scaling_max != effective_max && overall == RC_OK)
             overall = RC_UNSUPPORTED;
 
-        if (aggressive && !after.is_amd_pstate &&
+        if (aggressive && !after.is_amd_pstate_epp &&
             after.scaling_min != after.scaling_max && overall == RC_OK)
             overall = RC_UNSUPPORTED;
     }

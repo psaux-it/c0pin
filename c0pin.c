@@ -7,43 +7,53 @@
  * for time-sensitive workloads (real-time capture, low-latency audio,
  * industrial control loops, etc.).
  *
- * Two operating modes:
+ * Modes (see --help for the full option list):
  *
- *   --performance-policy
+ *   -p, --performance-policy
  *       Sets the cpufreq governor to "performance" and, where
  *       supported, the Energy Performance Preference (EPP) to
  *       "performance" on every cpufreq policy. Does not touch turbo,
  *       boost, or idle-state (C-state) behavior.
  *
- *   --aggressive [latency_us]
+ *   -a, --aggressive[=LATENCY_US]
  *       Everything above, plus:
  *         - disables intel_pstate turbo throttling (no_turbo=0,
  *           max_perf_pct=100) when intel_pstate is loaded
  *         - enables global or per-policy CPU boost
  *         - raises scaling_max_freq to cpuinfo_max_freq, and
  *           additionally pins scaling_min_freq to the same value on
- *           every driver except amd-pstate, which keeps CPPC min-perf
- *           kernel-controlled by design and would misrepresent that
- *           as a fixed frequency if scaling_min_freq were forced to
- *           match
+ *           every driver except amd-pstate-epp, which keeps CPPC
+ *           min-perf kernel-controlled by design and would
+ *           misrepresent that as a fixed frequency if
+ *           scaling_min_freq were forced to match
  *         - opens /dev/cpu_dma_latency and holds a PM QoS "CPU DMA
  *           latency" request for the process lifetime, which blocks
  *           the idle governor from selecting deep C-states. This is
  *           the primary mechanism behind the tool's name: it "pins"
  *           cores in C0.
- *       Runs as a foreground daemon in this mode, holding the QoS
- *       request open until SIGTERM/SIGINT, at which point the request
- *       is released and all other changes are left in place (they are
- *       not reverted on exit).
+ *       Runs as a foreground process holding the QoS request open
+ *       until SIGTERM/SIGINT (or, with -d/--daemonize, forks into the
+ *       background and holds it there instead). All other changes are
+ *       left in place on exit -- they are not reverted.
+ *
+ *   -s, --status
+ *       Prints the current governor, EPP, driver, and frequency state
+ *       of every cpufreq policy and exits. Read-only; does not
+ *       require root.
+ *
+ * Additional options: -n/--dry-run (report intended changes without
+ * applying them), -d/--daemonize (background --aggressive after setup
+ * completes), -h/--help, -V/--version.
  *
  * Exit codes:
  *   0  success (including partial/unsupported knobs on hardware that
  *      doesn't expose them - see RC_UNSUPPORTED handling)
- *   1  a genuine I/O or verification failure occurred
+ *   1  a genuine I/O, argument, or verification failure occurred
  *
- * Must be run as root: all operations write to sysfs (cpufreq,
- * intel_pstate) and to /dev/cpu_dma_latency, both of which require
- * elevated privileges.
+ * Must be run as root for -p/-a: all operations write to sysfs
+ * (cpufreq, intel_pstate) and to /dev/cpu_dma_latency, both of which
+ * require elevated privileges. -s/--status is read-only and does not
+ * require root.
  *
  * Author:  Hasan CALISIR <hasan.calisir@psauxit.com>
  * License: MIT
@@ -52,6 +62,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <glob.h>
 #include <limits.h>
 #include <signal.h>
@@ -60,7 +71,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #define CPUFREQ_ROOT "/sys/devices/system/cpu/cpufreq"
@@ -68,6 +81,8 @@
 #define CPU_DMA_LATENCY_DEVICE "/dev/cpu_dma_latency"
 #define SYSFS_BUF 4096U
 #define PATH_BUF 512U
+#define C0PIN_VERSION "1.1.0"
+#define C0PIN_PIDFILE "/run/c0pin.pid"
 
 enum rc_class {
     RC_OK = 0,
@@ -326,7 +341,9 @@ static bool list_contains(const char *list, const char *needle)
 
 /*
  * Only amd-pstate-epp (active/EPP mode, cpufreq_driver->setpolicy) clamps
- * CPPC min-perf to nominal_perf under the "performance" cpufreq policy
+ * CPPC min-perf to nominal_perf under the "performance" cpufreq policy --
+ * see amd_pstate_update_min_max_limit() in drivers/cpufreq/amd-pstate.c,
+ * which only takes that branch when cpudata->policy ==
  * CPUFREQ_POLICY_PERFORMANCE. That field is set exclusively from
  * amd_pstate_epp_set_policy().
  *
@@ -945,7 +962,8 @@ static int wait_for_shutdown(void)
 }
 
 static int process_policy(const char *policy, bool aggressive,
-                          bool global_boost_enabled, bool boost_fallback_required)
+                          bool global_boost_enabled, bool boost_fallback_required,
+                          bool dry_run)
 {
     struct policy_state before;
     unsigned long effective_max = 0UL;
@@ -963,6 +981,33 @@ static int process_policy(const char *policy, bool aggressive,
     printf("  driver=%s governor=%s cpuinfo=[%lu,%lu] policy=[%lu,%lu]\n",
            before.driver, before.governor, before.cpuinfo_min,
            before.cpuinfo_max, before.scaling_min, before.scaling_max);
+
+    /*
+     * Dry-run: report the changes this policy would receive without
+     * calling any of the writer functions below, and without running
+     * the post-write verification (which would otherwise observe
+     * "unchanged" values and misreport RC_UNSUPPORTED/RC_ERROR).
+     */
+    if (dry_run) {
+        printf("  [dry-run] governor '%s' -> 'performance'\n",
+               before.governor);
+        if (before.epp[0] != '\0')
+            printf("  [dry-run] epp '%s' -> 'performance'\n", before.epp);
+        else
+            printf("  [dry-run] epp: not exposed on this policy\n");
+
+        if (aggressive) {
+            printf("  [dry-run] scaling_max_freq %lu -> %lu\n",
+                   before.scaling_max, before.cpuinfo_max);
+            if (!before.is_amd_pstate_epp)
+                printf("  [dry-run] scaling_min_freq %lu -> %lu\n",
+                       before.scaling_min, before.cpuinfo_max);
+            else
+                printf("  [dry-run] scaling_min_freq: left kernel-controlled"
+                       " (amd-pstate-epp)\n");
+        }
+        return RC_OK;
+    }
 
     rc = set_governor_performance(policy);
     if (rc == RC_ERROR) {
@@ -1074,24 +1119,211 @@ static int process_exit_code(int overall)
     return overall == RC_ERROR ? 1 : 0;
 }
 
-static void usage(const char *prog)
+/*
+ * Read-only status dump: iterates the same cpufreq policies as the
+ * mutating modes but only ever calls read_policy_state(), so it needs
+ * no privilege and never touches any writer function.
+ */
+static int print_status(void)
 {
-    fprintf(stderr,
-            "Usage: %s [--performance-policy | --aggressive [latency_us]]\n"
-            "\n"
-            "  --performance-policy   Set performance governor and EPP=performance.\n"
-            "  --aggressive [latency_us]\n"
-            "                          Above plus boost/turbo controls, maximum policy,\n"
-            "                          and a persistent CPU DMA latency QoS request\n"
-            "                          (non-negative microseconds; defaults to 0 if\n"
-            "                          omitted). If this request cannot be acquired,\n"
-            "                          the tool aborts before changing any CPU state.\n",
-            prog);
+    glob_t g = {0};
+    size_t i;
+    int rc;
+    int overall = RC_OK;
+    char intel_mode[32];
+    bool intel_loaded;
+
+    rc = intel_pstate_mode(intel_mode, sizeof(intel_mode));
+    if (rc < 0) {
+        fprintf(stderr, "ERROR: cannot inspect intel_pstate: %s\n",
+                strerror(errno));
+        return RC_ERROR;
+    }
+    intel_loaded = rc == 1;
+
+    printf("Intel P-State: %s\n", intel_loaded ? intel_mode : "not active");
+
+    rc = glob(CPUFREQ_ROOT "/policy*", 0, NULL, &g);
+    if (rc == GLOB_NOMATCH) {
+        fprintf(stderr, "ERROR: no CPUFreq policies found under %s\n",
+                CPUFREQ_ROOT);
+        globfree(&g);
+        return RC_ERROR;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "ERROR: glob() failed: %d\n", rc);
+        globfree(&g);
+        return RC_ERROR;
+    }
+
+    for (i = 0; i < g.gl_pathc; ++i) {
+        struct stat st;
+        struct policy_state ps;
+        unsigned long n;
+
+        if (stat(g.gl_pathv[i], &st) < 0 || !S_ISDIR(st.st_mode))
+            continue;
+        if (policy_number(g.gl_pathv[i], &n) < 0)
+            continue;
+
+        if (read_policy_state(g.gl_pathv[i], &ps) < 0) {
+            fprintf(stderr, "WARN: cannot read %s: %s\n",
+                    g.gl_pathv[i], strerror(errno));
+            overall = RC_ERROR;
+            continue;
+        }
+
+        printf("%s: driver=%s governor=%s", g.gl_pathv[i], ps.driver,
+               ps.governor);
+        if (ps.epp[0] != '\0')
+            printf(" epp=%s", ps.epp);
+        printf(" freq=[%lu,%lu] cpuinfo=[%lu,%lu]\n",
+               ps.scaling_min, ps.scaling_max, ps.cpuinfo_min, ps.cpuinfo_max);
+    }
+
+    globfree(&g);
+    return overall;
 }
+
+static int write_pidfile(const char *path, pid_t pid)
+{
+    FILE *f;
+
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+
+    if (fprintf(f, "%d\n", (int)pid) < 0) {
+        (void)fclose(f);
+        return -1;
+    }
+
+    if (fclose(f) != 0)
+        return -1;
+
+    return 0;
+}
+
+static void remove_pidfile(const char *path)
+{
+    (void)unlink(path);
+}
+
+/*
+ * Classic double-fork daemonize. Must only be called after all CPU
+ * state changes and the CPU DMA latency QoS request have already been
+ * applied in the original process: fork() duplicates the existing
+ * dma_latency_fd as a shared open file description, so the PM QoS
+ * request the child inherits is the SAME kernel request the parent
+ * held -- not a new one -- and it stays active independent of which
+ * process's copy of the fd remains open.
+ *
+ * On success, returns 0 and execution continues in the final
+ * (grand-)child process; both intermediate parents have already
+ * exited via _exit() and never return from this function.
+ */
+static int daemonize_process(const char *pidfile_path)
+{
+    pid_t pid;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid > 0)
+        _exit(0); /* first parent exits immediately */
+
+    if (setsid() < 0)
+        return -1;
+
+    pid = fork(); /* second fork: prevent reacquiring a controlling tty */
+    if (pid < 0)
+        return -1;
+    if (pid > 0)
+        _exit(0); /* first child exits */
+
+    if (chdir("/") < 0)
+        return -1;
+
+    /*
+     * stdout/stderr are no longer attached to a terminal past this
+     * point; redirect them so writes don't fail or leak to whatever
+     * fd 1/2 happened to be reused for.
+     */
+    if (!freopen("/dev/null", "r", stdin))
+        return -1;
+    if (!freopen("/dev/null", "w", stdout))
+        return -1;
+    if (!freopen("/dev/null", "w", stderr))
+        return -1;
+
+    if (write_pidfile(pidfile_path, getpid()) < 0) {
+        /* Not fatal, but stderr is gone now -- report via syslog. */
+        openlog("c0pin", LOG_PID, LOG_DAEMON);
+        syslog(LOG_WARNING, "cannot write pidfile %s: %m", pidfile_path);
+        closelog();
+    }
+
+    return 0;
+}
+
+static void usage(FILE *out, const char *prog)
+{
+    fprintf(out,
+        "Usage: %s -p | -a[LATENCY_US] | -s [OPTIONS]\n"
+        "       %s --performance-policy | --aggressive[=LATENCY_US] | --status\n"
+        "\n"
+        "Modes (exactly one required, except -h/-V):\n"
+        "  -p, --performance-policy   Set performance governor and EPP=performance\n"
+        "                             on every cpufreq policy. Does not touch\n"
+        "                             turbo, boost, or idle-state behavior.\n"
+        "  -a, --aggressive[=LATENCY_US]\n"
+        "                             Above plus boost/turbo controls, maximum\n"
+        "                             frequency policy, and a persistent CPU DMA\n"
+        "                             latency QoS request (non-negative\n"
+        "                             microseconds; defaults to 0). Runs as a\n"
+        "                             foreground process holding the request\n"
+        "                             until SIGTERM/SIGINT, unless -d is given.\n"
+        "                             LATENCY_US may also be given as a trailing\n"
+        "                             positional argument for backward\n"
+        "                             compatibility, e.g. '-a 50'.\n"
+        "  -s, --status               Print current governor/EPP/frequency state\n"
+        "                             for every cpufreq policy and exit. Read-only;\n"
+        "                             does not require root.\n"
+        "\n"
+        "Options:\n"
+        "  -n, --dry-run              Show what would change without writing\n"
+        "                             anything to sysfs or acquiring the CPU DMA\n"
+        "                             latency QoS request. Valid with -p or -a.\n"
+        "  -d, --daemonize            With -a, fork into the background and\n"
+        "                             write a pid file (%s) instead of holding\n"
+        "                             the terminal in the foreground.\n"
+        "  -h, --help                 Show this help and exit.\n"
+        "  -V, --version              Show version information and exit.\n",
+        prog, prog, C0PIN_PIDFILE);
+}
+
+static const struct option long_opts[] = {
+    {"performance-policy", no_argument,       NULL, 'p'},
+    {"aggressive",         optional_argument, NULL, 'a'},
+    {"status",             no_argument,       NULL, 's'},
+    {"dry-run",            no_argument,       NULL, 'n'},
+    {"daemonize",          no_argument,       NULL, 'd'},
+    {"help",               no_argument,       NULL, 'h'},
+    {"version",            no_argument,       NULL, 'V'},
+    {NULL, 0, NULL, 0}
+};
+#define SHORT_OPTS "pa::sndhV"
 
 int main(int argc, char **argv)
 {
-    bool aggressive;
+    int opt;
+    bool perf_flag = false;
+    bool aggr_flag = false;
+    bool aggressive = false;
+    bool status_only = false;
+    bool dry_run = false;
+    bool daemonize = false;
+    bool latency_from_optarg = false;
     bool intel_loaded;
     char intel_mode[32];
     glob_t g = {0};
@@ -1104,34 +1336,112 @@ int main(int argc, char **argv)
     int32_t latency_us = 0;
     sigset_t shutdown_set;
 
-    if (geteuid() != 0) {
-        fprintf(stderr, "ERROR: root privileges are required.\n");
-        return RC_ERROR;
-    }
-
-    if (argc < 2 || argc > 3) {
-        usage(argv[0]);
-        return RC_ERROR;
-    }
-
-    if (!strcmp(argv[1], "--performance-policy")) {
-        aggressive = false;
-        if (argc != 2) {
-            usage(argv[0]);
+    while ((opt = getopt_long(argc, argv, SHORT_OPTS, long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'p':
+            perf_flag = true;
+            break;
+        case 'a':
+            aggr_flag = true;
+            if (optarg) {
+                if (parse_latency_us(optarg, &latency_us) != 0) {
+                    fprintf(stderr, "Invalid latency value: %s\n", optarg);
+                    fprintf(stderr,
+                            "Expected a non-negative integer number of microseconds.\n");
+                    return RC_ERROR;
+                }
+                latency_from_optarg = true;
+            }
+            break;
+        case 's':
+            status_only = true;
+            break;
+        case 'n':
+            dry_run = true;
+            break;
+        case 'd':
+            daemonize = true;
+            break;
+        case 'h':
+            usage(stdout, argv[0]);
+            return 0;
+        case 'V':
+            printf("c0pin %s\n", C0PIN_VERSION);
+            return 0;
+        default:
+            usage(stderr, argv[0]);
             return RC_ERROR;
         }
-    } else if (!strcmp(argv[1], "--aggressive")) {
-        aggressive = true;
-        if (argc == 3) {
-            if (parse_latency_us(argv[2], &latency_us) != 0) {
-                fprintf(stderr, "Invalid latency value: %s\n", argv[2]);
-                fprintf(stderr,
-                        "Expected a non-negative integer number of microseconds.\n");
-                return RC_ERROR;
-            }
+    }
+
+    if (perf_flag && aggr_flag) {
+        fprintf(stderr,
+                "ERROR: --performance-policy and --aggressive are mutually exclusive.\n");
+        return RC_ERROR;
+    }
+
+    if (status_only && (perf_flag || aggr_flag)) {
+        fprintf(stderr,
+                "ERROR: --status cannot be combined with --performance-policy or --aggressive.\n");
+        return RC_ERROR;
+    }
+
+    if (status_only && (dry_run || daemonize)) {
+        fprintf(stderr,
+                "ERROR: --status does not take --dry-run or --daemonize.\n");
+        return RC_ERROR;
+    }
+
+    if (dry_run && daemonize) {
+        fprintf(stderr,
+                "ERROR: --dry-run and --daemonize cannot be combined.\n");
+        return RC_ERROR;
+    }
+
+    aggressive = aggr_flag;
+
+    /*
+     * Legacy positional latency: "c0pin --aggressive 50". Only consulted
+     * when --aggressive/-a took no bundled/'=' argument, so "-a50" and
+     * "--aggressive=50" always take precedence.
+     */
+    if (aggr_flag && !latency_from_optarg && optind < argc) {
+        if (argc - optind != 1) {
+            usage(stderr, argv[0]);
+            return RC_ERROR;
         }
-    } else {
-        usage(argv[0]);
+        if (parse_latency_us(argv[optind], &latency_us) != 0) {
+            fprintf(stderr, "Invalid latency value: %s\n", argv[optind]);
+            fprintf(stderr,
+                    "Expected a non-negative integer number of microseconds.\n");
+            return RC_ERROR;
+        }
+        optind++;
+    }
+
+    if (optind < argc) {
+        fprintf(stderr, "ERROR: unexpected argument: %s\n", argv[optind]);
+        usage(stderr, argv[0]);
+        return RC_ERROR;
+    }
+
+    if (status_only) {
+        /* Read-only: intentionally does not require root. */
+        return print_status() == RC_OK ? 0 : 1;
+    }
+
+    if (!perf_flag && !aggr_flag) {
+        usage(stderr, argv[0]);
+        return RC_ERROR;
+    }
+
+    if (daemonize && !aggressive) {
+        fprintf(stderr, "ERROR: --daemonize requires --aggressive.\n");
+        return RC_ERROR;
+    }
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "ERROR: root privileges are required.\n");
         return RC_ERROR;
     }
 
@@ -1160,70 +1470,78 @@ int main(int argc, char **argv)
         printf("Intel P-State: not active\n");
 
     if (aggressive) {
-        int32_t effective_us = -1;
-
-        /*
-         * Acquire the latency lock before touching any CPU state --
-         * if this fails, abort now instead of running "aggressive"
-         * mode without the C-state guarantee it's supposed to give.
-         */
-        dma_latency_fd = acquire_cpu_dma_latency(latency_us, &effective_us);
-        if (dma_latency_fd < 0) {
-            fprintf(stderr, "ERROR: cannot acquire %s=%d: %s\n",
-                    CPU_DMA_LATENCY_DEVICE, latency_us, strerror(errno));
-            fprintf(stderr,
-                    "Aggressive mode requires a held CPU DMA latency QoS "
-                    "request; aborting before any CPU state is changed.\n");
-            return RC_ERROR;
-        }
-
-        if (effective_us >= 0) {
-            printf("CPU DMA latency QoS: requested %d us, effective "
-                   "system-wide aggregate %d us (fd=%d, held until exit)\n",
-                   latency_us, effective_us, dma_latency_fd);
+        if (dry_run) {
+            printf("[dry-run] would acquire %s (latency=%d us)\n",
+                   CPU_DMA_LATENCY_DEVICE, latency_us);
+            if (intel_loaded)
+                printf("[dry-run] would set intel_pstate no_turbo=0, max_perf_pct=100\n");
+            printf("[dry-run] would enable global or per-policy CPU boost\n");
         } else {
-            printf("CPU DMA latency QoS: requested %d us (fd=%d, held "
-                   "until exit)\n", latency_us, dma_latency_fd);
-        }
+            int32_t effective_us = -1;
 
-        if (intel_loaded) {
-            rc = set_intel_pstate_no_turbo_zero();
-            if (rc == RC_ERROR) {
-                fprintf(stderr, "ERROR: intel_pstate no_turbo=0 failed: %s\n",
-                        strerror(errno));
-                overall = RC_ERROR;
-            } else if (rc == RC_UNSUPPORTED) {
+            /*
+             * Acquire the latency lock before touching any CPU state --
+             * if this fails, abort now instead of running "aggressive"
+             * mode without the C-state guarantee it's supposed to give.
+             */
+            dma_latency_fd = acquire_cpu_dma_latency(latency_us, &effective_us);
+            if (dma_latency_fd < 0) {
+                fprintf(stderr, "ERROR: cannot acquire %s=%d: %s\n",
+                        CPU_DMA_LATENCY_DEVICE, latency_us, strerror(errno));
                 fprintf(stderr,
-                        "WARN: intel_pstate no_turbo control unavailable\n");
-                if (overall == RC_OK)
-                    overall = RC_UNSUPPORTED;
+                        "Aggressive mode requires a held CPU DMA latency QoS "
+                        "request; aborting before any CPU state is changed.\n");
+                return RC_ERROR;
             }
 
-            rc = set_intel_pstate_max_perf_100();
+            if (effective_us >= 0) {
+                printf("CPU DMA latency QoS: requested %d us, effective "
+                       "system-wide aggregate %d us (fd=%d, held until exit)\n",
+                       latency_us, effective_us, dma_latency_fd);
+            } else {
+                printf("CPU DMA latency QoS: requested %d us (fd=%d, held "
+                       "until exit)\n", latency_us, dma_latency_fd);
+            }
+
+            if (intel_loaded) {
+                rc = set_intel_pstate_no_turbo_zero();
+                if (rc == RC_ERROR) {
+                    fprintf(stderr, "ERROR: intel_pstate no_turbo=0 failed: %s\n",
+                            strerror(errno));
+                    overall = RC_ERROR;
+                } else if (rc == RC_UNSUPPORTED) {
+                    fprintf(stderr,
+                            "WARN: intel_pstate no_turbo control unavailable\n");
+                    if (overall == RC_OK)
+                        overall = RC_UNSUPPORTED;
+                }
+
+                rc = set_intel_pstate_max_perf_100();
+                if (rc == RC_ERROR) {
+                    fprintf(stderr,
+                            "ERROR: intel_pstate max_perf_pct=100 failed: %s\n",
+                            strerror(errno));
+                    overall = RC_ERROR;
+                } else if (rc == RC_UNSUPPORTED) {
+                    fprintf(stderr,
+                            "WARN: intel_pstate max_perf_pct control unavailable\n");
+                    if (overall == RC_OK)
+                        overall = RC_UNSUPPORTED;
+                }
+            }
+
+            rc = set_global_boost_enabled(intel_loaded);
             if (rc == RC_ERROR) {
-                fprintf(stderr,
-                        "ERROR: intel_pstate max_perf_pct=100 failed: %s\n",
+                fprintf(stderr, "ERROR: generic boost enable failed: %s\n",
                         strerror(errno));
                 overall = RC_ERROR;
-            } else if (rc == RC_UNSUPPORTED) {
+            } else if (rc == RC_OK) {
+                global_boost_enabled = true;
+            } else if (rc == RC_UNSUPPORTED && !intel_loaded) {
+                boost_fallback_required = true;
                 fprintf(stderr,
-                        "WARN: intel_pstate max_perf_pct control unavailable\n");
-                if (overall == RC_OK)
-                    overall = RC_UNSUPPORTED;
+                        "INFO: generic CPUFreq boost unavailable; checking policy-local boost\n");
             }
-        }
-
-        rc = set_global_boost_enabled(intel_loaded);
-        if (rc == RC_ERROR) {
-            fprintf(stderr, "ERROR: generic boost enable failed: %s\n",
-                    strerror(errno));
-            overall = RC_ERROR;
-        } else if (rc == RC_OK) {
-            global_boost_enabled = true;
-        } else if (rc == RC_UNSUPPORTED && !intel_loaded) {
-            boost_fallback_required = true;
-            fprintf(stderr,
-                    "INFO: generic CPUFreq boost unavailable; checking policy-local boost\n");
         }
     }
 
@@ -1254,7 +1572,8 @@ int main(int argc, char **argv)
             continue;
 
         rc = process_policy(g.gl_pathv[i], aggressive,
-                            global_boost_enabled, boost_fallback_required);
+                            global_boost_enabled, boost_fallback_required,
+                            dry_run);
         if (rc == RC_ERROR)
             overall = RC_ERROR;
         else if (rc == RC_UNSUPPORTED && overall == RC_OK)
@@ -1276,22 +1595,49 @@ int main(int argc, char **argv)
         return process_exit_code(overall);
     }
 
+    if (dry_run) {
+        printf("Result: dry-run complete (no changes applied)\n");
+        printf("Status: %s\n", overall == RC_OK ? "OK" : "PARTIAL/UNSUPPORTED");
+        return process_exit_code(overall);
+    }
+
     printf("Result: aggressive configuration complete\n");
     printf("Status: %s\n", overall == RC_OK ? "OK" : "PARTIAL/UNSUPPORTED");
 
-    /* dma_latency_fd is guaranteed valid here: we returned RC_ERROR above
-     * if acquiring it failed, before any CPU state was touched. */
-    printf("Aggressive lock active. Send SIGTERM or SIGINT to release CPU DMA latency QoS and exit.\n");
-    fflush(stdout);
+    if (daemonize) {
+        fflush(stdout);
+        if (daemonize_process(C0PIN_PIDFILE) < 0) {
+            fprintf(stderr, "ERROR: daemonize failed: %s\n", strerror(errno));
+            (void)close(dma_latency_fd);
+            return RC_ERROR;
+        }
+        /* Execution below this point continues in the daemonized child;
+         * stdout/stderr are now /dev/null. */
+    } else {
+        /* dma_latency_fd is guaranteed valid here: we returned RC_ERROR
+         * above if acquiring it failed, before any CPU state was touched. */
+        printf("Aggressive lock active. Send SIGTERM or SIGINT to release CPU DMA latency QoS and exit.\n");
+        fflush(stdout);
+    }
 
     rc = wait_for_shutdown();
     if (rc < 0) {
-        fprintf(stderr, "ERROR: shutdown wait failed: %s\n", strerror(errno));
+        if (daemonize) {
+            openlog("c0pin", LOG_PID, LOG_DAEMON);
+            syslog(LOG_ERR, "shutdown wait failed: %m");
+            closelog();
+        } else {
+            fprintf(stderr, "ERROR: shutdown wait failed: %s\n", strerror(errno));
+        }
         (void)close(dma_latency_fd);
+        if (daemonize)
+            remove_pidfile(C0PIN_PIDFILE);
         return RC_ERROR;
     }
 
     printf("Shutdown signal received. Releasing CPU DMA latency QoS.\n");
     (void)close(dma_latency_fd);
+    if (daemonize)
+        remove_pidfile(C0PIN_PIDFILE);
     return process_exit_code(overall);
 }
